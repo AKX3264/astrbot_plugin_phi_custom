@@ -1,0 +1,5 @@
+name: astrbot_plugin_phi_custom
+desc: 轻量的自定义 Phigros 查分插件，支持绑定、B30图片、歌曲搜索、曲绘、单曲成绩、别名管理等功能
+help: 发送 /phi_help 查看所有可用指令
+version: v1.2.1
+author: 只会写特效的AKX
