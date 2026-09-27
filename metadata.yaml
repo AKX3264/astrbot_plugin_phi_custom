@@ -10,4 +10,3 @@ astrbot_version: ">=4.17.0"            # 兼容的 AstrBot 版本（可选）
 tags:                                  # 标签，方便搜索（可选）
   - phigros
   - 音游
-  - 查分
