@@ -1,4 +1,10 @@
 {
+  "readme_notice": {
+    "description": "⚠️ 使用前必读：依赖安装说明",
+    "hint": "本插件需要 Python 库（pip）+ 系统组件（Playwright Chromium 必装、GTK3 可选）。\n\n详细安装步骤（含 Windows / Linux / macOS 各平台方法、离线手动安装）请查看插件目录下的 README.md。",
+    "type": "string",
+    "default": "（此配置项仅作提示，请勿修改）"
+  },
   "lilith_api_key": {
     "description": "Lilith API Key",
     "hint": "请前往 https://lilith.xtower.site/open-platform 使用 GitHub 登录，创建 API Key 并复制以 pgr_live_ 开头的密钥。",
@@ -38,5 +44,25 @@
     "hint": "开启后，若别名库为空，插件启动时会从 default_aliases.json 加载默认别名。",
     "type": "bool",
     "default": true
+  },
+  "news_use_remote": {
+    "description": "启用远程更新公告",
+    "hint": "开启后 /phi新曲 会拉取远程最新公告；关闭则只显示本地更新库。",
+    "type": "bool",
+    "default": true
+  },
+  "news_source_url": {
+    "description": "远程公告源地址",
+    "hint": "仅在“启用远程更新公告”开启时生效。默认使用 Lilith 开放平台的 song-updates 接口。",
+    "type": "string",
+    "default": "https://r0semi.xtower.site/api/v1/open/song-updates"
+  },
+  "news_local_show_count": {
+    "description": "本地公告显示条数",
+    "hint": "/phi新曲 时最多显示几条本地公告，默认 1 条。",
+    "type": "int",
+    "default": 1,
+    "min": 1,
+    "max": 20
   }
 }

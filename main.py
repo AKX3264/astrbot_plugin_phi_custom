@@ -1,57 +1,47 @@
 import os
 import sys
+import subprocess
+import importlib
 
 # ══════════════════════════════════════════════
-# 1. 手动注入 GTK3 运行时路径
+# Windows: 注入 GTK3 路径 + 修复 fontconfig
 # ══════════════════════════════════════════════
-_GTK_BIN_CANDIDATES = [
-    r"C:\Program Files\GTK3-Runtime Win64\bin",
-    r"C:\Program Files (x86)\GTK3-Runtime Win64\bin",
-]
-for _p in _GTK_BIN_CANDIDATES:
-    if os.path.isdir(_p):
-        os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
-        if hasattr(os, "add_dll_directory"):
+if sys.platform == "win32":
+    for _p in [r"C:\Program Files\GTK3-Runtime Win64\bin",
+               r"C:\Program Files (x86)\GTK3-Runtime Win64\bin"]:
+        if os.path.isdir(_p):
+            os.environ["PATH"] = _p + os.pathsep + os.environ.get("PATH", "")
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(_p)
+                except Exception:
+                    pass
+            break
+
+    _gtk_etc_fonts = r"C:\Program Files\GTK3-Runtime Win64\etc\fonts"
+    _windows_fonts = r"C:\Windows\Fonts"
+    if os.path.isdir(_gtk_etc_fonts) and os.path.isdir(_windows_fonts):
+        _local_conf = os.path.join(_gtk_etc_fonts, "local.conf")
+        if not os.path.exists(_local_conf):
             try:
-                os.add_dll_directory(_p)
-            except Exception:
-                pass
-        print(f"✅ [Phi插件] 已注入 GTK3 路径: {_p}")
-        break
-
-# ══════════════════════════════════════════════
-# 2. 修复 fontconfig
-# ══════════════════════════════════════════════
-_gtk_etc_fonts = r"C:\Program Files\GTK3-Runtime Win64\etc\fonts"
-_windows_fonts = r"C:\Windows\Fonts"
-if os.path.isdir(_gtk_etc_fonts) and os.path.isdir(_windows_fonts):
-    _local_conf = os.path.join(_gtk_etc_fonts, "local.conf")
-    _conf_content = f'''<?xml version="1.0"?>
+                with open(_local_conf, "w", encoding="utf-8") as f:
+                    f.write(f'''<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
 <fontconfig>
   <dir>{_windows_fonts}</dir>
   <cachedir>%LOCALAPPDATA%/fontconfig/cache</cachedir>
 </fontconfig>
-'''
-    try:
-        if not os.path.exists(_local_conf):
-            with open(_local_conf, "w", encoding="utf-8") as f:
-                f.write(_conf_content)
-            print(f"✅ [Phi插件] 已写入 fontconfig 配置: {_local_conf}")
-    except Exception as e:
-        print(f"⚠️ [Phi插件] 写入 fontconfig 失败: {e}")
+''')
+            except Exception:
+                pass
 
 # ══════════════════════════════════════════════
-# 3. 依赖自检与自动安装
+# 依赖自检
 # ══════════════════════════════════════════════
-import subprocess
-import importlib
-
 _REQUIRED_PACKAGES = [
-    ("httpx",    "httpx"),
-    ("qrcode",   "qrcode[pil]"),
-    ("PIL",      "Pillow"),
-    ("cairosvg", "cairosvg"),
+    ("httpx",  "httpx"),
+    ("qrcode", "qrcode[pil]"),
+    ("PIL",    "Pillow"),
 ]
 
 
@@ -60,7 +50,7 @@ def _check_and_install_deps():
     for import_name, pip_name in _REQUIRED_PACKAGES:
         try:
             importlib.import_module(import_name)
-        except ImportError:
+        except Exception:
             missing.append(pip_name)
     if not missing:
         return []
@@ -78,7 +68,7 @@ def _check_and_install_deps():
     return missing
 
 
-_missing_before = _check_and_install_deps()
+_check_and_install_deps()
 
 import json
 import re
@@ -98,21 +88,33 @@ os.makedirs(DATA_DIR, exist_ok=True)
 USER_DB = os.path.join(DATA_DIR, "users.json")
 ALIAS_DB = os.path.join(DATA_DIR, "aliases.json")
 TEMP_ALIAS_DB = os.path.join(DATA_DIR, "temp_aliases.json")
+LOCAL_NEWS_DB = os.path.join(DATA_DIR, "local_news.json")
 DEFAULT_ALIAS_FILE = os.path.join(os.path.dirname(__file__), "default_aliases.json")
 
 ILLUSTRATION_CDN = "https://somnia.xtower.site/lilith/ill"
 
+ALIAS_QUERY_TIMEOUT = 300
+ALIAS_QUERY_PAGE_SIZE = 20
+
+DEFAULT_NEWS_SOURCE = "https://r0semi.xtower.site/api/v1/open/song-updates"
+
 
 def load_json(path, default=None):
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"加载 {path} 失败: {e}")
     return default if default is not None else {}
 
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        logger.error(f"保存 {path} 失败: {e}")
 
 
 def load_default_aliases() -> dict:
@@ -152,6 +154,51 @@ def compress_image(img_bytes: bytes, max_width: int = 1000, quality: int = 85) -
         return img_bytes
 
 
+def encode_image_hq(img_bytes: bytes, hard_max: int = 5 * 1024 * 1024) -> bytes:
+    try:
+        from PIL import Image
+        img = Image.open(BytesIO(img_bytes))
+        if img.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", img.size, (20, 24, 38))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            bg.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        try:
+            buf = BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            png_data = buf.getvalue()
+            if len(png_data) <= hard_max:
+                logger.info(f"🎨 PNG 无损: {len(png_data)} 字节")
+                return png_data
+        except Exception:
+            pass
+
+        best = None
+        for q in [98, 95, 92, 90, 88, 85, 82, 80, 78, 75, 72, 70, 65, 60, 55, 50, 45, 40]:
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=q, optimize=True, subsampling=0)
+            data = buf.getvalue()
+            if len(data) <= hard_max:
+                best = data
+                logger.info(f"🎨 JPEG q={q}: {len(data)} 字节")
+                break
+            best = data
+
+        if best:
+            return best
+
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        logger.error(f"高质量编码失败: {e}")
+        return img_bytes
+
+
 def is_valid_image(data: bytes, min_size: int = 500) -> bool:
     return bool(data) and len(data) >= min_size
 
@@ -167,6 +214,10 @@ class PhiCustomPlugin(Star):
         self.taptap_ver = self.config.get("default_taptap_version", "cn")
         self.aliases = load_json(ALIAS_DB, {})
         self._qrcode_polling_users = {}
+        self._alias_query_mode = {}
+        self.news_use_remote = self.config.get("news_use_remote", True)
+        self.news_source_url = self.config.get("news_source_url", DEFAULT_NEWS_SOURCE).strip()
+        self.news_local_show_count = self.config.get("news_local_show_count", 3)
 
         if self.config.get("auto_load_aliases", True):
             if not self.aliases:
@@ -176,7 +227,7 @@ class PhiCustomPlugin(Star):
                     save_json(ALIAS_DB, self.aliases)
                     logger.info(f"✅ 已自动加载 {len(self.aliases)} 条默认别名")
 
-        logger.info("✅ Phi 自定义查分插件已加载！")
+        logger.info(f"✅ Phi 自定义查分插件已加载！远程公告：{'开' if self.news_use_remote else '关'}")
 
     def _headers(self):
         return {
@@ -201,6 +252,30 @@ class PhiCustomPlugin(Star):
         if len(parts) > 1:
             return parts[1].strip()
         return ""
+
+    def _extract_args_after_command(self, event: AstrMessageEvent, prefixes: list) -> str:
+        raw = event.message_str
+        if raw.startswith("/"):
+            raw = raw[1:]
+        low = raw.lower()
+        for prefix in prefixes:
+            if low.startswith(prefix.lower()):
+                return raw[len(prefix):].strip()
+        return raw.strip()
+
+    def _build_aliases_reverse_map(self) -> dict:
+        rev = {}
+        for alias, real in self.aliases.items():
+            rev.setdefault(real, []).append(alias)
+        return rev
+
+    def _load_news_db(self) -> dict:
+        db = load_json(LOCAL_NEWS_DB, {"news": []})
+        if not isinstance(db, dict):
+            db = {"news": []}
+        if "news" not in db or not isinstance(db["news"], list):
+            db["news"] = []
+        return db
 
     async def _upload_to_image_host(self, img_bytes: bytes) -> str | None:
         try:
@@ -258,16 +333,42 @@ class PhiCustomPlugin(Star):
 
         url = await self._upload_to_image_host(compressed)
         if url:
-            return event.image_result(url)
+            try:
+                return event.image_result(url)
+            except Exception as e:
+                logger.error(f"image_result(url) 失败: {e}")
 
         try:
             fd, path = tempfile.mkstemp(suffix=".jpg", prefix="phi_")
             with os.fdopen(fd, "wb") as f:
                 f.write(compressed)
-            return event.image_result(path)
+            try:
+                return event.image_result(path)
+            except Exception as e:
+                logger.error(f"image_result(path) 失败: {e}")
         except Exception as e:
             logger.error(f"本地文件保存失败: {e}")
-            return event.plain_result("❌ 图片发送失败")
+
+        return event.plain_result("❌ 图片发送失败")
+
+    async def _send_raw_image(self, event: AstrMessageEvent, img_bytes: bytes):
+        url = await self._upload_to_image_host(img_bytes)
+        if url:
+            try:
+                return event.image_result(url)
+            except Exception as e:
+                logger.error(f"image_result(url) 失败: {e}")
+        try:
+            fd, path = tempfile.mkstemp(suffix=".jpg", prefix="phi_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(img_bytes)
+            try:
+                return event.image_result(path)
+            except Exception as e:
+                logger.error(f"image_result(path) 失败: {e}")
+        except Exception as e:
+            logger.error(f"本地文件保存失败: {e}")
+        return event.plain_result("❌ 图片发送失败")
 
     async def _get_json(self, path: str, params: dict = None):
         try:
@@ -295,6 +396,27 @@ class PhiCustomPlugin(Star):
             logger.error(f"API [{path}] 异常: {e}")
         return None
 
+    async def _fetch_remote_news(self) -> list:
+        if not self.news_use_remote:
+            return []
+        if not self.news_source_url:
+            return []
+        try:
+            async with httpx.AsyncClient(
+                proxy=self.proxy if self.proxy else None, timeout=self.timeout
+            ) as client:
+                if self.api_url in self.news_source_url:
+                    resp = await client.get(self.news_source_url, headers=self._headers())
+                else:
+                    resp = await client.get(self.news_source_url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        return data
+        except Exception as e:
+            logger.error(f"拉取远程更新源失败: {e}")
+        return []
+
     async def _post_svg(self, path: str, body: dict = None, params: dict = None) -> bytes | None:
         try:
             async with httpx.AsyncClient(
@@ -307,14 +429,16 @@ class PhiCustomPlugin(Star):
                 svg_text = resp.text
 
                 try:
-                    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-  html,body {{ margin:0; padding:0; background:#141826; }}
-  * {{ font-family: 'Microsoft YaHei','微软雅黑','SimHei','Arial',sans-serif !important; }}
-  image, img {{ max-width:100%; }}
-</style>
-</head><body>{svg_text}</body></html>"""
+                    html = (
+                        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                        "<style>"
+                        "html,body{margin:0;padding:0;background:#141826;}"
+                        "*{font-family:'Microsoft YaHei','微软雅黑','SimHei','Noto Sans CJK SC','Arial',sans-serif !important;}"
+                        "img,image{max-width:100%;}"
+                        "</style></head><body>"
+                        + svg_text +
+                        "</body></html>"
+                    )
                     img_result = await self.html_render(html, {})
                     if isinstance(img_result, bytes) and len(img_result) > 1000:
                         return img_result
@@ -347,34 +471,81 @@ class PhiCustomPlugin(Star):
                     png = cairosvg.svg2png(bytestring=svg_text.encode("utf-8"))
                     if png and len(png) > 1000:
                         return png
-                except Exception as e:
-                    logger.warning(f"cairosvg 失败: {e}")
+                except Exception:
+                    pass
 
                 return None
         except Exception as e:
             logger.error(f"SVG API [{path}] 异常: {e}")
         return None
 
-    @filter.command("phi_help")
+    # ══════════════════════════════════════════════
+    # /phi_help（英文）/phi帮助（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_help", alias={"phi帮助"})
     async def phi_help(self, event: AstrMessageEvent):
-        yield event.plain_result(
-            "📋 Phigros 插件指令列表\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            "🔗 /phi_bind <Token>   - 手动绑定账号\n"
-            "📱 /phi_qrcode bind    - 二维码绑定账号\n"
-            "📊 /phi_b30            - 查询 Best 30 图片\n"
-            "🔍 /phi_search <歌名>  - 搜索歌曲信息\n"
-            "🖼️ /phi_picture <歌名> - 获取歌曲曲绘（纯图）\n"
-            "🎵 /phi_song <歌名>    - 查询单曲成绩（图）\n"
-            "🔓 /phi_unbind         - 解绑账号\n"
-            "🔄 /phi_update         - 更新账号信息\n"
-            "🆕 /phi_new            - 最新更新歌曲\n"
-            "❓ /<别名>是什么歌     - 查询别名对应歌名\n"
-            "━━━━━━━━━━━━━━━━━━━\n"
-            "管理员：/phi_othername\n"
-            "💡 支持带空格的歌名（如：/phi_search CROSS SOUL）"
-        )
+        raw = event.message_str.strip()
+        if raw.startswith("/"):
+            raw = raw[1:]
+        cmd_name = raw.split(None, 1)[0] if raw else ""
+        use_chinese = ("帮助" in cmd_name)
 
+        if use_chinese:
+            yield event.plain_result(
+                "📋 Phigros 插件指令列表（中文）\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "🔗 /phi_bind <Token>          - 手动绑定账号\n"
+                "📱 /phi_qrcode bind           - 二维码绑定账号\n"
+                "📊 /phi查分                   - 查询 Best 30 图片\n"
+                "🔍 /phi搜歌 <歌名>            - 搜索歌曲信息\n"
+                "🖼️ /phi曲绘 <歌名>            - 获取歌曲曲绘\n"
+                "🎵 /phi单曲 <歌名>            - 查询单曲成绩\n"
+                "🔓 /phi解绑                   - 解绑账号\n"
+                "🔄 /phi更新                   - 更新账号信息\n"
+                "🆕 /phi新曲                   - 最新更新公告\n"
+                "♻️ /phi重载                   - 重载插件配置\n"
+                "❓ /phi<别名>是什么歌          - 查询别名对应歌名\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "管理员：/phi别名\n"
+                "  · /phi别名 查询              - 进入别名查询模式\n"
+                "  · /phi别名 add <别名> <歌名> - 添加别名\n"
+                "  · /phi别名 delete <别名>     - 删除别名\n"
+                "  · /phi别名 temp              - 审核队列\n"
+                "  · /phi_new add §内容§         - 覆盖当前公告（旧版入历史）\n"
+                "  · /phi_new all               - 查看全部历史公告\n"
+                "  · /phi_new del               - 清空公告数据库\n"
+                "💡 支持带空格的歌名（如：/phi搜歌 CROSS SOUL）"
+            )
+        else:
+            yield event.plain_result(
+                "📋 Phigros Plugin Commands (English)\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "🔗 /phi_bind <Token>          - Bind account manually\n"
+                "📱 /phi_qrcode bind           - Bind via QR code\n"
+                "📊 /phi_b30                   - Query Best 30 image\n"
+                "🔍 /phi_search <song>         - Search song info\n"
+                "🖼️ /phi_picture <song>        - Get song illustration\n"
+                "🎵 /phi_song <song>           - Query single song score\n"
+                "🔓 /phi_unbind                - Unbind account\n"
+                "🔄 /phi_update                - Update account info\n"
+                "🆕 /phi_new                   - Latest update news\n"
+                "♻️ /phi_reload                - Reload plugin config\n"
+                "❓ /phi<alias>是什么歌        - Look up song by alias\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "Admin: /phi_othername\n"
+                "  · /phi_othername query       - Enter alias query mode\n"
+                "  · /phi_othername add <alias> <song> - Add alias\n"
+                "  · /phi_othername delete <alias>     - Delete alias\n"
+                "  · /phi_othername temp              - Review queue\n"
+                "  · /phi_new add §content§         - Overwrite current news\n"
+                "  · /phi_new all               - View all historical news\n"
+                "  · /phi_new del               - Clear news database\n"
+                "💡 Song names with spaces are supported (e.g. /phi_search CROSS SOUL)"
+            )
+
+    # ══════════════════════════════════════════════
+    # /phi_bind（单指令，无别名）
+    # ══════════════════════════════════════════════
     @filter.command("phi_bind")
     async def phi_bind(self, event: AstrMessageEvent, token: str = None):
         if not token or len(token.strip()) != 25:
@@ -384,8 +555,11 @@ class PhiCustomPlugin(Star):
         db = load_json(USER_DB, {})
         db[uid] = token.strip()
         save_json(USER_DB, db)
-        yield event.plain_result("✅ 绑定成功！发送 /phi_b30 即可查询成绩。")
+        yield event.plain_result("✅ 绑定成功！发送 /phi_b30 或 /phi查分 即可查询成绩。")
 
+    # ══════════════════════════════════════════════
+    # /phi_qrcode（单指令，无别名）
+    # ══════════════════════════════════════════════
     @filter.command("phi_qrcode")
     async def phi_qrcode(self, event: AstrMessageEvent, action: str = None):
         if not action or action.strip().lower() != "bind":
@@ -514,7 +688,10 @@ class PhiCustomPlugin(Star):
         finally:
             self._qrcode_polling_users.pop(uid, None)
 
-    @filter.command("phi_b30")
+    # ══════════════════════════════════════════════
+    # /phi_b30（英文）/phi查分（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_b30", alias={"phi查分"})
     async def phi_b30(self, event: AstrMessageEvent):
         uid = event.get_sender_id()
         db = load_json(USER_DB, {})
@@ -533,11 +710,14 @@ class PhiCustomPlugin(Star):
         else:
             yield event.plain_result("❌ 生成 B30 图片失败。请检查日志。")
 
-    @filter.command("phi_search")
+    # ══════════════════════════════════════════════
+    # /phi_search（英文）/phi搜歌（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_search", alias={"phi搜歌"})
     async def phi_search(self, event: AstrMessageEvent):
         song_name = self._extract_song_name(event)
         if not song_name:
-            yield event.plain_result("⚠️ 请输入歌曲名：/phi_search Spasmodic")
+            yield event.plain_result("⚠️ 请输入歌曲名：/phi搜歌 Spasmodic")
             return
         resolved = self._resolve_song_name(song_name)
         yield event.plain_result(f"🔍 正在搜索「{resolved}」...")
@@ -559,11 +739,14 @@ class PhiCustomPlugin(Star):
             )
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("phi_picture")
+    # ══════════════════════════════════════════════
+    # /phi_picture（英文）/phi曲绘（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_picture", alias={"phi曲绘"})
     async def phi_picture(self, event: AstrMessageEvent):
         song_name = self._extract_song_name(event)
         if not song_name:
-            yield event.plain_result("⚠️ 请输入歌曲名：/phi_picture Spasmodic")
+            yield event.plain_result("⚠️ 请输入歌曲名：/phi曲绘 Spasmodic")
             return
         resolved = self._resolve_song_name(song_name)
         yield event.plain_result(f"🖼️ 正在获取「{resolved}」的曲绘...")
@@ -586,18 +769,23 @@ class PhiCustomPlugin(Star):
             ) as client:
                 r = await client.get(ill_url)
                 if r.status_code == 200 and len(r.content) > 1000:
-                    yield await self._send_image(event, r.content)
+                    hq_bytes = encode_image_hq(r.content)
+                    logger.info(f"🎨 曲绘编码: {len(r.content)} → {len(hq_bytes)} 字节")
+                    yield await self._send_raw_image(event, hq_bytes)
                     return
         except Exception as e:
             logger.error(f"曲绘下载异常: {e}")
 
         yield event.plain_result(f"❌ 未找到「{song_display_name}」的曲绘。")
 
-    @filter.command("phi_song")
+    # ══════════════════════════════════════════════
+    # /phi_song（英文）/phi单曲（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_song", alias={"phi单曲"})
     async def phi_song(self, event: AstrMessageEvent):
         song_name = self._extract_song_name(event)
         if not song_name:
-            yield event.plain_result("⚠️ 请输入歌曲名：/phi_song Spasmodic")
+            yield event.plain_result("⚠️ 请输入歌曲名：/phi单曲 Spasmodic")
             return
         resolved = self._resolve_song_name(song_name)
 
@@ -626,7 +814,10 @@ class PhiCustomPlugin(Star):
         else:
             yield event.plain_result("❌ 生成单曲成绩图失败，请检查日志。")
 
-    @filter.command("phi_unbind")
+    # ══════════════════════════════════════════════
+    # /phi_unbind（英文）/phi解绑（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_unbind", alias={"phi解绑"})
     async def phi_unbind(self, event: AstrMessageEvent):
         uid = event.get_sender_id()
         db = load_json(USER_DB, {})
@@ -637,7 +828,10 @@ class PhiCustomPlugin(Star):
         else:
             yield event.plain_result("⚠️ 你尚未绑定账号。")
 
-    @filter.command("phi_update")
+    # ══════════════════════════════════════════════
+    # /phi_update（英文）/phi更新（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_update", alias={"phi更新"})
     async def phi_update(self, event: AstrMessageEvent):
         uid = event.get_sender_id()
         db = load_json(USER_DB, {})
@@ -662,20 +856,143 @@ class PhiCustomPlugin(Star):
             f"📈 RKS：{rks_str}"
         )
 
-    @filter.command("phi_new")
+    # ══════════════════════════════════════════════
+    # /phi_new（英文）/phi新曲（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_new", alias={"phi新曲"})
     async def phi_new(self, event: AstrMessageEvent):
-        yield event.plain_result("🆕 正在获取最新歌曲信息...")
-        data = await self._get_json("/api/v1/open/song-updates")
-        if not data or not isinstance(data, list):
-            yield event.plain_result("❌ 获取失败，请检查网络。")
-            return
-        latest = data[0]
-        version = latest.get("version", "?")
-        date = latest.get("updateDate", "?")
-        content = latest.get("content", "")
-        yield event.plain_result(f"🆕 Phigros {version} 更新 ({date})\n\n{content}")
+        args = self._extract_args_after_command(event, ["phi_new", "phi新曲"])
+        args_low = args.lower()
 
-    @filter.command("phi_reload")
+        if args_low.startswith("add"):
+            if not event.is_admin():
+                yield event.plain_result("❌ 只有管理员才能添加更新公告。")
+                return
+            rest = args[3:].strip()
+            m = re.search(r"§(.*?)§", rest, re.DOTALL)
+            if not m:
+                yield event.plain_result(
+                    "⚠️ 格式错误。用法：\n"
+                    "/phi_new add §公告内容§\n"
+                    "（内容支持空格、换行、标点，但不能包含 § 符号）"
+                )
+                return
+            content = m.group(1).strip()
+            if not content:
+                yield event.plain_result("⚠️ 公告内容不能为空。")
+                return
+
+            db = self._load_news_db()
+            news = db["news"]
+
+            old_current = None
+            for n in news:
+                if n.get("current"):
+                    n["current"] = False
+                    old_current = n
+
+            new_id = (max([n.get("id", 0) for n in news]) + 1) if news else 1
+            new_entry = {
+                "id": new_id,
+                "content": content,
+                "author_id": event.get_sender_id(),
+                "author_name": event.get_sender_name(),
+                "timestamp": int(time.time()),
+                "current": True,
+            }
+            news.append(new_entry)
+            save_json(LOCAL_NEWS_DB, db)
+
+            msg_parts = [f"✅ 已发布新公告 #{new_id}"]
+            if old_current:
+                msg_parts.append(f"📦 旧公告 #{old_current['id']} 已归档到历史库")
+            msg_parts.append("━━━━━━━━━━━━━━━━")
+            msg_parts.append(content)
+            msg_parts.append("━━━━━━━━━━━━━━━━")
+            msg_parts.append(f"👤 发布者：{event.get_sender_name()}")
+            yield event.plain_result("\n".join(msg_parts))
+            return
+
+        if args_low == "del":
+            if not event.is_admin():
+                yield event.plain_result("❌ 只有管理员才能清空公告库。")
+                return
+            db = self._load_news_db()
+            total = len(db["news"])
+            if total == 0:
+                yield event.plain_result("📋 公告数据库已经是空的。")
+                return
+            db["news"] = []
+            save_json(LOCAL_NEWS_DB, db)
+            yield event.plain_result(f"🗑️ 已清空公告数据库（删除了 {total} 条记录）。")
+            return
+
+        if args_low == "all":
+            db = self._load_news_db()
+            news = db["news"]
+            if not news:
+                yield event.plain_result("📋 公告数据库为空。")
+                return
+            news_sorted = sorted(news, key=lambda n: n.get("timestamp", 0), reverse=True)
+            lines = [f"📚 公告数据库（共 {len(news)} 条，按时间倒序）\n━━━━━━━━━━━━━━━━"]
+            for n in news_sorted:
+                tag = "🟢 当前" if n.get("current") else "⚪ 历史"
+                lines.append(f"#{n['id']} {tag}　👤 {n.get('author_name', '?')}")
+                lines.append(n['content'])
+                lines.append("━━━━━━━━━━━━━━━━")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        yield event.plain_result("🆕 正在获取最新更新信息...")
+
+        parts = []
+
+        remote_news = await self._fetch_remote_news()
+        if remote_news:
+            latest = remote_news[0]
+            version = latest.get("version", "?")
+            date = latest.get("updateDate", "?")
+            content = latest.get("content", "")
+            parts.append(
+                f"🌐 远程更新公告（v{version}）\n"
+                f"📅 {date}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"{content}"
+            )
+
+        db = self._load_news_db()
+        news = db["news"]
+        current_entry = None
+        for n in news:
+            if n.get("current"):
+                current_entry = n
+                break
+
+        if current_entry:
+            parts.append(
+                f"📰 当前本地公告 #{current_entry['id']}　👤 {current_entry.get('author_name', '?')}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"{current_entry['content']}"
+            )
+        elif news:
+            news_sorted = sorted(news, key=lambda n: n.get("timestamp", 0), reverse=True)
+            latest_local = news_sorted[0]
+            parts.append(
+                f"📰 当前本地公告 #{latest_local['id']}　👤 {latest_local.get('author_name', '?')}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"{latest_local['content']}"
+            )
+
+        if not parts:
+            yield event.plain_result("⚠️ 暂无更新信息。")
+            return
+
+        yield event.plain_result("\n\n".join(parts))
+
+    # ══════════════════════════════════════════════
+    # /phi_reload（英文）/phi重载（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_reload", alias={"phi重载"})
     async def phi_reload(self, event: AstrMessageEvent):
         try:
             self.api_url = self.config.get("phi_api_url", "https://r0semi.xtower.site").rstrip("/")
@@ -684,42 +1001,82 @@ class PhiCustomPlugin(Star):
             self.timeout = self.config.get("timeout", 30)
             self.taptap_ver = self.config.get("default_taptap_version", "cn")
             self.aliases = load_json(ALIAS_DB, {})
+            self.news_use_remote = self.config.get("news_use_remote", True)
+            self.news_source_url = self.config.get("news_source_url", DEFAULT_NEWS_SOURCE).strip()
+            self.news_local_show_count = self.config.get("news_local_show_count", 3)
             yield event.plain_result("✅ 插件配置已重载！")
         except Exception as e:
             yield event.plain_result(f"❌ 重载失败：{str(e)}")
 
-    @filter.command("phi_othername")
+    # ══════════════════════════════════════════════
+    # /phi_othername（英文）/phi别名（中文）
+    # ══════════════════════════════════════════════
+    @filter.command("phi_othername", alias={"phi别名"})
     async def phi_othername(self, event: AstrMessageEvent):
         msg = event.message_str.strip()
         if msg.startswith("/"):
             msg = msg[1:]
+        low = msg.lower()
+        for prefix in ("phi_othername", "phi别名"):
+            if low.startswith(prefix.lower()):
+                msg = msg[len(prefix):].strip()
+                break
         parts = msg.split()
-        if len(parts) < 2:
+        if not parts:
             yield event.plain_result(
                 "📋 别名管理指令：\n"
                 "━━━━━━━━━━━━━━━━━━━\n"
+                "🔍 /phi别名 查询               - 进入别名查询模式\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
                 "【普通成员】提交添加申请：\n"
-                "  /phi_othername add <别名> <歌名>\n"
+                "  /phi别名 add <别名> <歌名>\n"
                 "━━━━━━━━━━━━━━━━━━━\n"
                 "【管理员】直接操作：\n"
-                "  /phi_othername add <别名> <歌名>     - 直接添加\n"
-                "  /phi_othername delete <别名>         - 直接删除\n"
-                "  /phi_othername delete all            - 重置别名库\n"
-                "  /phi_othername temp [页码]           - 查看待审核队列（每页10条）\n"
-                "  /phi_othername temp approved <id>[,<id>...]  - 通过指定申请\n"
-                "  ⚠️ 审核后，队列中未通过的申请将被自动驳回。"
+                "  /phi别名 add <别名> <歌名>     - 直接添加\n"
+                "  /phi别名 delete <别名>         - 直接删除\n"
+                "  /phi别名 delete all            - 重置别名库\n"
+                "  /phi别名 temp [页码]           - 查看待审核队列\n"
+                "  /phi别名 temp approved <id>[,<id>...] - 通过指定申请"
             )
             return
-        action = parts[1].lower()
+
+        action = parts[0].lower()
         is_admin = event.is_admin()
         sender_id = event.get_sender_id()
         sender_name = event.get_sender_name()
-        if action == "add":
-            if len(parts) < 4:
-                yield event.plain_result("⚠️ 用法：/phi_othername add <别名> <歌名>")
+
+        if action in ("查询", "query"):
+            rev_map = self._build_aliases_reverse_map()
+            songs_list = sorted(rev_map.keys())
+
+            if not songs_list:
+                yield event.plain_result("📋 别名库为空，暂无可查询的歌曲。")
                 return
-            alias_name = parts[2]
-            song_name = " ".join(parts[3:])
+
+            self._alias_query_mode[sender_id] = {
+                "songs": songs_list,
+                "map": rev_map,
+                "time": time.time(),
+            }
+
+            lines = [f"🔍 **别名查询模式已开启**（共 {len(songs_list)} 首歌）"]
+            lines.append("━" * 16)
+            for i, name in enumerate(songs_list[:ALIAS_QUERY_PAGE_SIZE], 1):
+                lines.append(f"{i}. {name}  ({len(rev_map[name])} 个别名)")
+            if len(songs_list) > ALIAS_QUERY_PAGE_SIZE:
+                lines.append(f"... 还有 {len(songs_list) - ALIAS_QUERY_PAGE_SIZE} 首未显示")
+            lines.append("━" * 16)
+            lines.append("💡 回复**序号**或**歌名**查看该歌的所有别名")
+            lines.append("💡 输入「取消」退出查询模式")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        if action == "add":
+            if len(parts) < 3:
+                yield event.plain_result("⚠️ 用法：/phi别名 add <别名> <歌名>")
+                return
+            alias_name = parts[1]
+            song_name = " ".join(parts[2:])
             if alias_name in self.aliases:
                 yield event.plain_result(f"⚠️ 别名「{alias_name}」已存在，对应歌曲为「{self.aliases[alias_name]}」。")
                 return
@@ -744,11 +1101,12 @@ class PhiCustomPlugin(Star):
                     f"✅ 已提交别名申请，等待管理员审核。\n"
                     f"申请编号：{new_id}\n别名：「{alias_name}」→「{song_name}」"
                 )
+
         elif action == "delete":
             if not is_admin:
                 yield event.plain_result("❌ 只有管理员才能删除别名。")
                 return
-            if len(parts) >= 3 and parts[2].lower() == "all":
+            if len(parts) >= 2 and parts[1].lower() == "all":
                 defaults = load_default_aliases()
                 if not defaults:
                     yield event.plain_result("⚠️ 默认别名文件为空或不存在，无法重置。")
@@ -757,25 +1115,26 @@ class PhiCustomPlugin(Star):
                 save_json(ALIAS_DB, self.aliases)
                 yield event.plain_result(f"✅ 已重置别名库，当前共 {len(self.aliases)} 条默认别名。")
                 return
-            if len(parts) < 3:
-                yield event.plain_result("⚠️ 用法：/phi_othername delete <别名> 或 /phi_othername delete all")
+            if len(parts) < 2:
+                yield event.plain_result("⚠️ 用法：/phi别名 delete <别名> 或 /phi别名 delete all")
                 return
-            alias_name = parts[2]
+            alias_name = parts[1]
             if alias_name in self.aliases:
                 del self.aliases[alias_name]
                 save_json(ALIAS_DB, self.aliases)
                 yield event.plain_result(f"✅ 已删除别名：「{alias_name}」")
             else:
                 yield event.plain_result(f"⚠️ 未找到别名：「{alias_name}」")
+
         elif action == "temp":
             if not is_admin:
                 yield event.plain_result("❌ 只有管理员才能查看审核队列。")
                 return
-            if len(parts) >= 3 and parts[2].lower() == "approved":
-                if len(parts) < 4:
-                    yield event.plain_result("⚠️ 用法：/phi_othername temp approved <id>[,<id>...]")
+            if len(parts) >= 2 and parts[1].lower() == "approved":
+                if len(parts) < 3:
+                    yield event.plain_result("⚠️ 用法：/phi别名 temp approved <id>[,<id>...]")
                     return
-                id_str = parts[3]
+                id_str = parts[2]
                 id_list = [int(x) for x in re.split(r"[,，\s]+", id_str.strip()) if x.isdigit()]
                 if not id_list:
                     yield event.plain_result("⚠️ 无效的编号，请输入数字（可多个，用英文逗号隔开）。")
@@ -816,8 +1175,8 @@ class PhiCustomPlugin(Star):
             total = len(temp)
             total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
             page = 1
-            if len(parts) >= 3 and parts[2].isdigit():
-                page = int(parts[2])
+            if len(parts) >= 2 and parts[1].isdigit():
+                page = int(parts[1])
             if page < 1 or page > total_pages:
                 yield event.plain_result(f"⚠️ 页码 {page} 无效，当前共 {total_pages} 页。")
                 return
@@ -828,36 +1187,95 @@ class PhiCustomPlugin(Star):
                 lines.append(f"{item['id']}.{item['song']} 别名:{item['alias']}")
             lines.append("")
             if page < total_pages:
-                lines.append(f"➡️ 下一页：/phi_othername temp {page+1}")
+                lines.append(f"➡️ 下一页：/phi别名 temp {page+1}")
             if page > 1:
-                lines.append(f"⬅️ 上一页：/phi_othername temp {page-1}")
-            lines.append("✅ 通过：/phi_othername temp approved <id>[,<id>...]")
+                lines.append(f"⬅️ 上一页：/phi别名 temp {page-1}")
+            lines.append("✅ 通过：/phi别名 temp approved <id>[,<id>...]")
             lines.append("⚠️ 未被选中的申请将被自动驳回。")
             yield event.plain_result("\n".join(lines))
         else:
-            yield event.plain_result("⚠️ 未知操作。")
+            yield event.plain_result("⚠️ 未知操作。发送 /phi别名 查看用法。")
 
     # ══════════════════════════════════════════════
-    # /<别名>是什么歌  —— 宽松匹配（兼容带 / 和不带 / 的情况）
+    # 别名查询模式消息监听
     # ══════════════════════════════════════════════
-    @filter.regex(r"(.+?)是什么歌")
+    @filter.regex(r".+")
+    async def on_alias_query_input(self, event: AstrMessageEvent):
+        uid = event.get_sender_id()
+        if uid not in self._alias_query_mode:
+            return
+
+        state = self._alias_query_mode[uid]
+        if time.time() - state["time"] > ALIAS_QUERY_TIMEOUT:
+            del self._alias_query_mode[uid]
+            return
+
+        msg = event.message_str.strip()
+        if not msg:
+            return
+
+        if msg.startswith("/"):
+            return
+
+        if msg in ("取消", "退出", "exit", "quit", "q", "Q"):
+            del self._alias_query_mode[uid]
+            yield event.plain_result("✅ 已退出别名查询模式。")
+            return
+
+        state["time"] = time.time()
+
+        songs_list = state["songs"]
+        rev_map = state["map"]
+
+        target = None
+
+        if msg.isdigit():
+            idx = int(msg)
+            if 1 <= idx <= len(songs_list):
+                target = songs_list[idx - 1]
+            else:
+                yield event.plain_result(f"⚠️ 序号超出范围（1~{len(songs_list)}）。")
+                return
+
+        if target is None:
+            msg_low = msg.lower()
+            for name in songs_list:
+                if name.lower() == msg_low:
+                    target = name
+                    break
+            if target is None:
+                for name in songs_list:
+                    if msg_low in name.lower():
+                        target = name
+                        break
+
+        if target is None:
+            yield event.plain_result(
+                f"⚠️ 未找到「{msg}」。\n"
+                f"请输入正确的**序号**或**歌名**，或输入「取消」退出。"
+            )
+            return
+
+        aliases = rev_map.get(target, [])
+        lines = [f"🔍 **{target}** 的别名（{len(aliases)} 个）\n━━━━━━━━━━━━━━━━"]
+        for i, a in enumerate(aliases, 1):
+            lines.append(f"{i}. {a}")
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append("💡 继续输入其他序号/歌名查询，或输入「取消」退出。")
+        yield event.plain_result("\n".join(lines))
+
+    # ══════════════════════════════════════════════
+    # /phi<别名>是什么歌
+    # ══════════════════════════════════════════════
+    @filter.regex(r"phi(.+?)是什么歌")
     async def alias_query(self, event: AstrMessageEvent):
         msg = event.message_str.strip()
-        logger.info(f"🔍 alias_query 收到消息: {msg!r}")
-
-        m = re.search(r"(.+?)是什么歌", msg)
+        m = re.search(r"phi(.+?)是什么歌", msg, re.IGNORECASE)
         if not m:
             return
-
-        alias = m.group(1).strip()
-        # 去掉可能的前缀符号（/、/、@机器人 等）
-        alias = alias.lstrip("/／@ ").strip()
-
-        logger.info(f"🔍 提取到的别名: {alias!r}")
-
+        alias = m.group(1).strip().lstrip("/／@ ").strip()
         if not alias:
             return
-
         real = self.aliases.get(alias)
         if real:
             yield event.plain_result(f"「{alias}」是 {real}")
